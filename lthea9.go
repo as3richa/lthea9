@@ -2,6 +2,7 @@ package lthea9
 
 import (
 	"bytes"
+	"math"
 	"sort"
 	"strings"
 )
@@ -181,14 +182,64 @@ func (index *SubseqIndex) Query(subseq string, maxResults int, onResult func(Que
 		return
 	}
 
+	index.queryBigram(bytes, onResult)
+}
+
+func (index *SubseqIndex) queryBigram(bytes []byte, onResult func(QueryResult)) {
+	leadingBigramFactor := 1
+	leadingCharFactor := 4
+	unsortedFactor := 16
+
 	chars := make([]byte, len(bytes))
 	for i, b := range bytes {
 		chars[i] = asciiByteToChar(b)
 	}
 
-	// ???
+	leadingBigram := bigramId(chars[0], chars[1])
+	leadingBigramCost := leadingBigramFactor * len(index.bigram[leadingBigram])
 
-	return
+	var bestLeadingCharBigram int
+	bestLeadingCharCost := math.MaxInt32
+	{
+		for i := 2; i < len(chars); i += 1 {
+			bigram := bigramId(chars[0], chars[i])
+			cost := len(index.bigram[bigram])
+			if cost < bestLeadingCharCost {
+				bestLeadingCharBigram = bigram
+				bestLeadingCharCost = cost
+			}
+		}
+		bestLeadingCharCost *= leadingCharFactor
+	}
+
+	var bestUnsortedBigram int
+	bestUnsortedBigramCost := math.MaxInt32
+	{
+		unsortedSeekLimit := 16
+		if unsortedSeekLimit > len(chars) {
+			unsortedSeekLimit = len(chars)
+		}
+
+		for i := 2; i < unsortedSeekLimit-1; i += 1 {
+			for j := i + 1; j < unsortedSeekLimit; j += 1 {
+				bigram := bigramId(chars[i], chars[j])
+				cost := len(index.bigram[bigram])
+				if cost < bestUnsortedBigramCost {
+					bestUnsortedBigram = bigram
+					bestUnsortedBigramCost = cost
+				}
+			}
+		}
+		bestUnsortedBigramCost *= unsortedFactor
+	}
+
+	if leadingBigramCost <= bestLeadingCharCost && leadingBigramCost <= bestUnsortedBigramCost {
+		_ = leadingBigram
+	} else if bestLeadingCharCost <= leadingBigramCost && bestLeadingCharCost <= bestUnsortedBigramCost {
+		_ = bestLeadingCharBigram
+	} else {
+		_ = bestUnsortedBigram
+	}
 }
 
 func (index *SubseqIndex) stringBytes(str int) []byte {

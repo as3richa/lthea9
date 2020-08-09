@@ -19,12 +19,12 @@ type SubseqIndexBuilder struct {
 
 type monogramEntry struct {
 	str int
-	pos byte
+	pos int
 }
 
 type bigramEntry struct {
 	str int
-	pos [2]byte
+	pos [2]int
 }
 
 type SubseqIndex struct {
@@ -36,32 +36,39 @@ type SubseqIndex struct {
 	bigram [distinctChars * distinctChars][]bigramEntry
 }
 
+type queryResult struct {
+	str int
+	pos []byte
+}
+
 type QueryResult struct {
 	str string
 	pos []byte
 }
 
 const (
-	distinctChars = (0x7e - 0x20 + 1) - 26 + 1
-	binaryChar    = distinctChars - 1
+	distinctChars   = (0x7e - 0x20 + 1) - 26
+	distinctBigrams = distinctChars * distinctChars
+	badId           = math.MaxInt32
 )
 
-func asciiByteToChar(b byte) byte {
-	if b <= 0x19 {
-		return binaryChar
-	} else if b <= 0x60 {
-		return b - 0x20
-	} else if b <= 0x7a {
-		return b - 0x40
-	} else if b <= 0x7e {
-		return b - 0x20
+func charId(b byte) int {
+	if b <= 0x19 || b >= 0x7f {
+		return 0xff
+	} else if 0x61 <= b && b <= 0x7a {
+		return int(b) - 0x40
 	} else {
-		return binaryChar
+		return int(b) - 0x20
 	}
 }
 
-func bigramId(ch0, ch1 byte) int {
-	return int(ch0)*distinctChars + int(ch1)
+func bigramId(b0, b1 byte) int {
+	ch0 := charId(b0)
+	ch1 := charId(b1)
+	if ch0 == badId || ch1 == badId {
+		return badId
+	}
+	return charId(b0)*distinctChars + ch1
 }
 
 func (builder *SubseqIndexBuilder) Insert(str string) {
@@ -83,13 +90,13 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 	}
 
 	sort.Slice(index.strs, func(str1, str2 int) bool {
-		return bytes.Compare(index.stringBytes(str1), index.stringBytes(str2)) == -1
+		return bytes.Compare(index.strBytes(str1), index.strBytes(str2)) == -1
 	})
 
 	{
 		k := 1
 		for i := 1; i < len(index.strs); i += 1 {
-			if bytes.Equal(index.stringBytes(i), index.stringBytes(i-1)) {
+			if bytes.Equal(index.strBytes(i), index.strBytes(i-1)) {
 				continue
 			}
 			index.strs[k] = index.strs[i]
@@ -101,15 +108,15 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 	for str := range index.strs {
 		var monogramBitmap [(distinctChars + 7) / 8]byte
 
-		for pos, b := range index.stringBytes(str) {
-			ch := asciiByteToChar(b)
-			if bitmapTestAndSet(monogramBitmap[:], int(ch)) {
+		for pos, b := range index.strBytes(str) {
+			id := charId(b)
+			if id == badId || bitmapTestAndSet(monogramBitmap[:], id) {
 				continue
 			}
 
-			index.monogram[ch] = append(index.monogram[ch], monogramEntry{
+			index.monogram[id] = append(index.monogram[id], monogramEntry{
 				str: str,
-				pos: toByteSaturating(pos),
+				pos: pos,
 			})
 		}
 	}
@@ -121,22 +128,22 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 
 	for str := range index.strs {
 		var bigramBitmap [(distinctChars*distinctChars + 7) / 8]byte
-		strBytes := index.stringBytes(str)
+		strBytes := index.strBytes(str)
 
 		for pos0, b0 := range strBytes {
-			ch := asciiByteToChar(b0)
+			if charId(b0) == 0xff {
+				continue
+			}
+
 			for pos1, b1 := range strBytes[pos0+1:] {
-				id := bigramId(ch, asciiByteToChar(b1))
-				if bitmapTestAndSet(bigramBitmap[:], id) {
+				id := bigramId(b0, b1)
+				if id == badId || bitmapTestAndSet(bigramBitmap[:], id) {
 					continue
 				}
 
 				index.bigram[id] = append(index.bigram[id], bigramEntry{
 					str: str,
-					pos: [2]byte{
-						toByteSaturating(pos0),
-						toByteSaturating(pos1),
-					},
+					pos: [2]int{pos0, pos1},
 				})
 			}
 		}
@@ -161,7 +168,7 @@ func (index *SubseqIndex) Query(subseq string, maxResults int, onResult func(Que
 		}
 		for str := 0; str < maxResults; str += 1 {
 			onResult(QueryResult{
-				str: string(index.stringBytes(str)),
+				str: string(index.strBytes(str)),
 				pos: nil,
 			})
 		}
@@ -169,14 +176,14 @@ func (index *SubseqIndex) Query(subseq string, maxResults int, onResult func(Que
 	}
 
 	if len(bytes) == 1 {
-		ary := index.monogram[asciiByteToChar(bytes[0])]
+		ary := index.monogram[charId(bytes[0])]
 		if maxResults > len(ary) {
 			maxResults = len(ary)
 		}
 		for _, entry := range ary {
 			onResult(QueryResult{
-				str: string(index.stringBytes(entry.str)),
-				pos: []byte{entry.pos},
+				str: string(index.strBytes(entry.str)),
+				pos: []byte{toByteSaturating(entry.pos)},
 			})
 		}
 		return
@@ -186,63 +193,179 @@ func (index *SubseqIndex) Query(subseq string, maxResults int, onResult func(Que
 }
 
 func (index *SubseqIndex) queryBigram(bytes []byte, onResult func(QueryResult)) {
-	leadingBigramFactor := 1
-	leadingCharFactor := 4
-	unsortedFactor := 16
+}
 
-	chars := make([]byte, len(bytes))
-	for i, b := range bytes {
-		chars[i] = asciiByteToChar(b)
-	}
+func (index *SubseqIndex) planLeadingBigram(subseqBytes []byte) (int, func(int, func(QueryResult))) {
+	leadingBigram := bigramId(subseqBytes[0], subseqBytes[1])
+	ary := index.bigram[leadingBigram]
 
-	leadingBigram := bigramId(chars[0], chars[1])
-	leadingBigramCost := leadingBigramFactor * len(index.bigram[leadingBigram])
-
-	var bestLeadingCharBigram int
-	bestLeadingCharCost := math.MaxInt32
-	{
-		for i := 2; i < len(chars); i += 1 {
-			bigram := bigramId(chars[0], chars[i])
-			cost := len(index.bigram[bigram])
-			if cost < bestLeadingCharCost {
-				bestLeadingCharBigram = bigram
-				bestLeadingCharCost = cost
-			}
-		}
-		bestLeadingCharCost *= leadingCharFactor
-	}
-
-	var bestUnsortedBigram int
-	bestUnsortedBigramCost := math.MaxInt32
-	{
-		unsortedSeekLimit := 16
-		if unsortedSeekLimit > len(chars) {
-			unsortedSeekLimit = len(chars)
+	execute := func(maxResults int, onResult func(QueryResult)) {
+		if maxResults == 0 {
+			return
 		}
 
-		for i := 2; i < unsortedSeekLimit-1; i += 1 {
-			for j := i + 1; j < unsortedSeekLimit; j += 1 {
-				bigram := bigramId(chars[i], chars[j])
-				cost := len(index.bigram[bigram])
-				if cost < bestUnsortedBigramCost {
-					bestUnsortedBigram = bigram
-					bestUnsortedBigramCost = cost
+		groupLeadingBigramPos := [2]int{-1, -1}
+		var group []queryResult
+
+		emit := func() {
+			index.sortAndEmitGroup(group, &maxResults, []byte{byte(groupLeadingBigramPos[0]), byte(groupLeadingBigramPos[1])}, onResult)
+		}
+
+		for _, entry := range ary {
+			if entry.pos != groupLeadingBigramPos {
+				emit()
+				if maxResults == 0 {
+					return
 				}
+				group = group[:0]
+				groupLeadingBigramPos = entry.pos
 			}
+
+			pos := index.matchStr(entry.str, entry.pos[1]+1, subseqBytes[2:])
+			if pos == nil {
+				continue
+			}
+
+			group = append(group, queryResult{
+				str: entry.str,
+				pos: pos,
+			})
 		}
-		bestUnsortedBigramCost *= unsortedFactor
+
+		emit()
 	}
 
-	if leadingBigramCost <= bestLeadingCharCost && leadingBigramCost <= bestUnsortedBigramCost {
-		_ = leadingBigram
-	} else if bestLeadingCharCost <= leadingBigramCost && bestLeadingCharCost <= bestUnsortedBigramCost {
-		_ = bestLeadingCharBigram
+	return len(ary), execute
+}
+
+func (index *SubseqIndex) planLeadingChar(subseqBytes []byte) (int, func(int, func(QueryResult))) {
+	ary := index.bigram[bigramId(subseqBytes[0], subseqBytes[1])]
+	for i := 2; i < len(subseqBytes); i += 1 {
+		candidate := index.bigram[bigramId(subseqBytes[0], subseqBytes[i])]
+		if len(candidate) < len(ary) {
+			ary = candidate
+		}
+	}
+
+	execute := func(maxResults int, onResult func(QueryResult)) {
+		if maxResults == 0 {
+			return
+		}
+
+		groupLeadingCharPos := -1
+		var group []queryResult
+
+		emit := func() {
+			index.sortAndEmitGroup(group, &maxResults, []byte{toByteSaturating(groupLeadingCharPos)}, onResult)
+		}
+
+		for _, entry := range ary {
+			if entry.pos[0] != groupLeadingCharPos {
+				emit()
+				if maxResults == 0 {
+					return
+				}
+				group = group[:0]
+				groupLeadingCharPos = entry.pos[0]
+			}
+
+			pos := index.matchStr(entry.str, entry.pos[0]+1, subseqBytes[1:])
+			if pos == nil {
+				continue
+			}
+
+			group = append(group, queryResult{
+				str: entry.str,
+				pos: pos,
+			})
+		}
+
+		emit()
+	}
+
+	return len(ary), execute
+}
+
+func (index *SubseqIndex) planUnsorted(subseqBytes []byte) (int, func(int, func(QueryResult))) {
+	seekLimit := 16
+	if len(subseqBytes) < seekLimit {
+		seekLimit = len(subseqBytes)
+	}
+
+	ary := index.bigram[bigramId(subseqBytes[0], subseqBytes[1])]
+	for i := 0; i < seekLimit-1; i += 1 {
+		for j := i + 1; j < seekLimit; j += 1 {
+			candidate := index.bigram[bigramId(subseqBytes[i], subseqBytes[j])]
+			if len(candidate) < len(ary) {
+				ary = candidate
+			}
+		}
+	}
+
+	execute := func(maxResults int, onResult func(QueryResult)) {
+		var filtered []queryResult
+
+		for _, entry := range ary {
+			pos := index.matchStr(entry.str, 0, subseqBytes)
+			if pos == nil {
+				continue
+			}
+			filtered = append(filtered, queryResult{
+				str: entry.str,
+				pos: pos,
+			})
+		}
+
+		index.sortAndEmitGroup(filtered, &maxResults, nil, onResult)
+	}
+
+	return len(ary), execute
+}
+
+func (index *SubseqIndex) sortAndEmitGroup(group []queryResult, maxResults *int, leadingPos []byte, onResult func(QueryResult)) {
+	sort.Slice(group, func(i, j int) bool {
+		cmp := bytes.Compare(group[i].pos, group[j].pos)
+		return cmp == -1 || (cmp == 0 && group[i].str < group[j].str)
+	})
+
+	if len(group) > *maxResults {
+		group = group[:*maxResults]
+		*maxResults = 0
 	} else {
-		_ = bestUnsortedBigram
+		*maxResults -= len(group)
+	}
+
+	for _, res := range group {
+		onResult(QueryResult{
+			str: string(index.strBytes(res.str)),
+			pos: append(leadingPos, res.pos...),
+		})
 	}
 }
 
-func (index *SubseqIndex) stringBytes(str int) []byte {
+func (index *SubseqIndex) matchStr(str int, startingAt int, subseqBytes []byte) []byte {
+	strBytes := index.strBytes(str)
+	pos := make([]byte, len(subseqBytes))
+
+	cursor := startingAt
+	for i, b := range subseqBytes {
+		for cursor < len(strBytes) {
+			if strBytes[cursor] == b {
+				break
+			}
+			cursor += 1
+		}
+		if cursor == len(strBytes) {
+			return nil
+		}
+		pos[i] = toByteSaturating(cursor)
+		cursor += 1
+	}
+
+	return pos
+}
+
+func (index *SubseqIndex) strBytes(str int) []byte {
 	return index.buffer[index.strs[str].start:index.strs[str].end]
 }
 

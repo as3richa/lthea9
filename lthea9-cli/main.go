@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/as3richa/lthea9/lthea9"
+	"github.com/as3richa/lthea9"
 )
 
 func main() {

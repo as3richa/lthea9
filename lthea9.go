@@ -2,8 +2,8 @@ package lthea9
 
 import (
 	"bytes"
-	"math"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -46,31 +46,6 @@ type QueryResult struct {
 	Pos []byte
 }
 
-const (
-	distinctChars   = (0x7e - 0x20 + 1) - 26
-	distinctBigrams = distinctChars * distinctChars
-	badId           = math.MaxInt32
-)
-
-func charId(b byte) int {
-	if b <= 0x19 || b >= 0x7f {
-		return 0xff
-	} else if 0x61 <= b && b <= 0x7a {
-		return int(b) - 0x40
-	} else {
-		return int(b) - 0x20
-	}
-}
-
-func bigramId(b0, b1 byte) int {
-	ch0 := charId(b0)
-	ch1 := charId(b1)
-	if ch0 == badId || ch1 == badId {
-		return badId
-	}
-	return charId(b0)*distinctChars + ch1
-}
-
 func (builder *SubseqIndexBuilder) Insert(str string) {
 	builder.strs = append(builder.strs, bufferString{
 		start: builder.buffer.Len(),
@@ -89,8 +64,8 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 		strs:   builder.strs,
 	}
 
-	sort.Slice(index.strs, func(str1, str2 int) bool {
-		return bytesLessThanCaseInsensitive(index.strBytes(str1), index.strBytes(str2))
+	sort.Slice(index.strs, func(left, right int) bool {
+		return bytesLessThanCaseInsensitive(index.strBytes(left), index.strBytes(right))
 	})
 
 	{
@@ -157,6 +132,22 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 	}
 
 	return index
+}
+
+func (index *SubseqIndex) QueryChan(subseq string, maxResults int) chan QueryResult {
+	results := make(chan QueryResult)
+	go index.Query(subseq, maxResults, func(res QueryResult) {
+		results <- res
+	})
+	return results
+}
+
+func (index *SubseqIndex) QuerySlice(subseq string, maxResults int) []QueryResult {
+	var results []QueryResult
+	index.Query(subseq, maxResults, func(res QueryResult) {
+		results = append(results, res)
+	})
+	return results
 }
 
 func (index *SubseqIndex) Query(subseq string, maxResults int, onResult func(QueryResult)) {
@@ -353,7 +344,7 @@ func (index *SubseqIndex) sortAndEmitGroup(group []queryResult, maxResults *int,
 
 	for _, res := range group {
 		onResult(QueryResult{
-			Str: string(index.strBytes(res.str)),
+			Str: string(index.strBytes(res.str)) + strconv.Itoa(res.str),
 			Pos: append(leadingPos, res.pos...),
 		})
 	}
@@ -383,69 +374,4 @@ func (index *SubseqIndex) matchStr(str int, startingAt int, subseqBytes []byte) 
 
 func (index *SubseqIndex) strBytes(str int) []byte {
 	return index.buffer[index.strs[str].start:index.strs[str].end]
-}
-
-func bitmapTestAndSet(bitmap []byte, k int) bool {
-	if (bitmap[k/8]>>uint(k%8))&1 == 1 {
-		return true
-	}
-	bitmap[k/8] |= 1 << uint(k%8)
-	return false
-}
-
-func toByteSaturating(n int) byte {
-	if n <= 0xff {
-		return byte(n)
-	}
-	return 0xff
-}
-
-func asciiToLower(b byte) byte {
-	if asciiIsLower(b) {
-		return b - 0x20
-	}
-	return b
-}
-
-func asciiIsLower(b byte) bool {
-	return 0x41 <= b && b <= 0x7a
-}
-
-func bytesLessThanCaseInsensitive(left []byte, right []byte) bool {
-	max := len(left)
-	if len(right) < max {
-		max = len(right)
-	}
-
-	caseBias := 0
-
-	for i := 0; i < max; i += 1 {
-		b0 := left[i]
-		b1 := right[i]
-
-		if b0 == b1 {
-			continue
-		}
-
-		if asciiToLower(b0) == asciiToLower(b1) {
-			if caseBias == 0 {
-				if asciiIsLower(b0) {
-					caseBias = 1
-				} else {
-					caseBias = -1
-				}
-			}
-			continue
-		}
-
-		return b0 < b1
-	}
-
-	if len(left) < len(right) {
-		return true
-	} else if len(left) > len(right) {
-		return false
-	} else {
-		return caseBias == -1
-	}
 }

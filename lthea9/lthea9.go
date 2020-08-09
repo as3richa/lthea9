@@ -90,7 +90,7 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 	}
 
 	sort.Slice(index.strs, func(str1, str2 int) bool {
-		return bytes.Compare(index.strBytes(str1), index.strBytes(str2)) == -1
+		return bytesLessThanCaseInsensitive(index.strBytes(str1), index.strBytes(str2))
 	})
 
 	{
@@ -127,7 +127,7 @@ func (builder *SubseqIndexBuilder) Build() SubseqIndex {
 	}
 
 	for str := range index.strs {
-		var bigramBitmap [(distinctChars*distinctChars + 7) / 8]byte
+		var bigramBitmap [(distinctBigrams + 7) / 8]byte
 		strBytes := index.strBytes(str)
 
 		for pos0 := 0; pos0 < len(strBytes)-1; pos0 += 1 {
@@ -398,4 +398,54 @@ func toByteSaturating(n int) byte {
 		return byte(n)
 	}
 	return 0xff
+}
+
+func asciiToLower(b byte) byte {
+	if asciiIsLower(b) {
+		return b - 0x20
+	}
+	return b
+}
+
+func asciiIsLower(b byte) bool {
+	return 0x41 <= b && b <= 0x7a
+}
+
+func bytesLessThanCaseInsensitive(left []byte, right []byte) bool {
+	max := len(left)
+	if len(right) < max {
+		max = len(right)
+	}
+
+	caseBias := 0
+
+	for i := 0; i < max; i += 1 {
+		b0 := left[i]
+		b1 := right[i]
+
+		if b0 == b1 {
+			continue
+		}
+
+		if asciiToLower(b0) == asciiToLower(b1) {
+			if caseBias == 0 {
+				if asciiIsLower(b0) {
+					caseBias = 1
+				} else {
+					caseBias = -1
+				}
+			}
+			continue
+		}
+
+		return b0 < b1
+	}
+
+	if len(left) < len(right) {
+		return true
+	} else if len(left) > len(right) {
+		return false
+	} else {
+		return caseBias == -1
+	}
 }
